@@ -2,9 +2,9 @@ from collections import Counter
 import numpy as np
 from sklearn.metrics import accuracy_score
 
-K = 13
+K = 12
 tags2idx = {'START':0, 'A':1, 'C':2, 'D':3, 'M':4, 'N':5,\
-                'O':6, 'P':7, 'R':8, 'V':9, 'W':10, 'Unk': 11, 'END':12}
+                'O':6, 'P':7, 'R':8, 'V':9, 'W':10, 'END':11}
 idx2tags = {idx: tag for tag, idx in tags2idx.items()}
 print(idx2tags)
 ALPHA = 1
@@ -14,7 +14,7 @@ class Sent(object):
     def __init__(self, tokens=None, tags=None):
         self.tokens = tokens
         self.tags = tags
-        self.pred = None
+        self.preds = None
 
 def load_train_data(fname):
     ''' load train data 
@@ -22,7 +22,7 @@ def load_train_data(fname):
     with open(fname) as fin:
         raw_data = fin.read().splitlines()
     data = []
-    vocal2count = Counter()
+    token2count = Counter()
     for sent in raw_data:
         tokens, tags = [], []
         token_tag_pairs = sent.split(' ')
@@ -31,27 +31,28 @@ def load_train_data(fname):
             # token to lowercase
             token = token.lower()
             tokens.append(token), tags.append(tag)
-        vocal2count.update(tokens)
+        token2count.update(tokens)
         sent = Sent(tokens, tags)
         data.append(sent)
     print("Loaded {} sentences in train set".format(len(data)))
-    return data, vocal2count
+    return data, token2count
         
-def preprocess(data, vocal2count, threshold):
+def preprocess(data, token2count, threshold):
     ''' replace the token word less then K with token 'Unk'
     '''
     uncommon_wordset = set()
-    for word, count in vocal2count.items():
+    vocal = set()
+    for token, count in token2count.items():
         if count <= threshold:
-            uncommon_wordset.add(word)
-
-    vocal = set(sorted(vocal2count.keys()))
-    print('Vocabulary size: %d , %d words in uncommon word set' % (len(vocal), len(uncommon_wordset)))
+            uncommon_wordset.add(token)
+        else:
+            vocal.add(token)
     for sent in data:
         for idx, token in enumerate(sent.tokens):
             if token in uncommon_wordset:
-                sent.tags[idx] = 'Unk'
-            
+                sent.tokens[idx] = 'Unk'
+    vocal.add('Unk')
+    print('Vocabulary size: %d , %d words in uncommon word set' % (len(vocal), len(uncommon_wordset)))          
     print('finish preprocessing')
     return vocal, data
 
@@ -77,7 +78,7 @@ def cal_trans_count(trn_data):
     return trans_cnt
 
 def cal_emit_count(trn_data, word2idx):
-    ''' caculate emission count  with shape = (V, K)
+    ''' caculate emission count with shape = (V, K)
     '''
     V = len(word2idx)
     emit_count = np.zeros((V, K))
@@ -124,12 +125,8 @@ def load_dev_data(fname, vocal):
             token, tag = pair.split('/')
             # token to lowercase
             token = token.lower()
-            if token in vocal:
-                tokens.append(token) 
-                tags.append(tag)
-            else:
-                tokens.append(token)
-                tags.append('Unk')
+            tags.append(tag)
+            tokens.append(token) # if token in vocal else tokens.append('Unk')
         sent = Sent(tokens, tags)
         data.append(sent)
     print("Loaded {} sentences in dev set".format(len(data)))
@@ -139,14 +136,14 @@ def viterbi_decoding(data, smooth_trans_logprobs, smooth_emit_logprobs, word2idx
     ''' Viterbi_decoding algorithm
     '''
     for sent in data:
-        pred_tags = []
         # dealing with the START token
         # calculate v0 with shape K 
+        pred_tags = []
         v_prev = smooth_trans_logprobs[tags2idx['START'], :]
-        for idx, token in enumerate(sent.tokens):
-            if token not in word2idx:
-                pred_tags.append('Unk')
-                continue
+        sent_len = len(sent.tokens)
+        # main loop
+        for idx in range(sent_len):
+            token = sent.tokens[idx] if sent.tokens[idx] in word2idx else 'Unk'
             if idx > 0:
                 s = smooth_emit_logprobs[word2idx[token], :] + smooth_trans_logprobs[tags2idx[pred_tags[-1]], :]
             else:
@@ -155,7 +152,15 @@ def viterbi_decoding(data, smooth_trans_logprobs, smooth_emit_logprobs, word2idx
             max_idx = np.argmax(v)
             pred_tags.append(idx2tags[max_idx])
             v = v_prev
-        sent.pred = pred_tags
+        sent.preds = pred_tags
+        # assert len(sent.preds) == len(sent.tags)
+
+def test_acc(data):
+    preds, labels = [], []
+    for sent in data:
+        labels.extend(sent.tags)
+        preds.extend(sent.preds)
+    return accuracy_score(labels, preds)
 
 def load_test_data(fname):
     ''' load test data 
@@ -172,17 +177,10 @@ def load_test_data(fname):
     print("Loaded {} sentences in test set".format(len(data)))
     return data
 
-def test_acc(data):
-    pred, label = [], []
-    for sent in data:
-        label.extend(sent.tags)
-        pred.extend(sent.pred)
-    return accuracy_score(label, pred)
-
 def save_test_pos(tst_data, fname):
     with open(fname, 'w') as f:
         for sent in tst_data:
-            tokens, preds = sent.tokens, sent.pred
+            tokens, preds = sent.tokens, sent.preds
             pairs = ['%s/%s'%(token, pred) for token, pred in zip(tokens, preds) ]
             line = ' '.join(pairs) + '\n'
             f.write(line)
@@ -190,9 +188,9 @@ def save_test_pos(tst_data, fname):
 
 def main():
     # load data
-    trn_data, vocal2count = load_train_data('data/trn.pos')
+    trn_data, token2count = load_train_data('data/trn.pos')
     # preprocess data
-    vocal, trn_data = preprocess(trn_data, vocal2count, threshold=1)
+    vocal, trn_data = preprocess(trn_data, token2count, threshold=1)
     # calculate transition count with shape = (K, K)
     trans_cnt = cal_trans_count(trn_data)
     # save to tprob.txt
