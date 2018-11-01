@@ -136,22 +136,29 @@ def viterbi_decoding(data, smooth_trans_logprobs, smooth_emit_logprobs, word2idx
     ''' Viterbi_decoding algorithm
     '''
     for sent in data:
-        # dealing with the START token
-        # calculate v0 with shape K 
+        # intialization
         pred_tags = []
-        v_prev = smooth_trans_logprobs[tags2idx['START'], :]
         sent_len = len(sent.tokens)
-        # main loop
-        for idx in range(sent_len):
+        V = np.zeros((sent_len, K)) # v shape = (sent_len, k)
+        B = np.zeros((sent_len, K), dtype=int) # b shape = (sent_len, k) or (sent_len-1, k)
+        # v1
+        token = sent.tokens[0] if sent.tokens[0] in word2idx else 'Unk'
+        V[0,:] = smooth_trans_logprobs[tags2idx['START'], :] + smooth_emit_logprobs[word2idx[token], :]
+        B[0,:] = np.argmax(smooth_trans_logprobs[tags2idx['START'], :] + smooth_emit_logprobs[word2idx[token], :])
+        # forward
+        for idx in range(1, sent_len):
             token = sent.tokens[idx] if sent.tokens[idx] in word2idx else 'Unk'
-            if idx > 0:
-                s = smooth_emit_logprobs[word2idx[token], :] + smooth_trans_logprobs[tags2idx[pred_tags[-1]], :]
-            else:
-                s = smooth_emit_logprobs[word2idx[token], :]
-            v = s + v_prev
-            max_idx = np.argmax(v)
-            pred_tags.append(idx2tags[max_idx])
-            v = v_prev
+            # V_prev 
+            for k in range(K):
+                scores = smooth_trans_logprobs[:,k] + smooth_emit_logprobs[word2idx[token],:] + V[idx-1, :]
+                V[idx, k] = max(scores)
+                B[idx, k] = np.argmax(scores)
+        scores = smooth_trans_logprobs[:,tags2idx['END']] + V[-1, :]
+        y = np.argmax(scores)
+        # backward
+        for idx in range(sent_len-1, -1, -1):
+            pred_tags.insert(0, idx2tags[B[idx, y]])
+            y = B[idx, y]
         sent.preds = pred_tags
         # assert len(sent.preds) == len(sent.tags)
 
@@ -200,7 +207,9 @@ def main():
     save_trans_probs(trans_probs, fname='data/jc6ub-tprob.txt')
     # smoothing and save smooth probablities
     smooth_trans_cnt = trans_cnt + BETA
+    smooth_trans_cnt[:,0] = smooth_trans_cnt[-1,:] = 0. # make smooth value correct
     smooth_trans_tot_cnt = np.sum(smooth_trans_cnt, axis=1, keepdims=True)
+    smooth_trans_tot_cnt[-1,:] = 1.0 # avoid divided by zero: no tags can follow END
     smooth_trans_probs = smooth_trans_cnt / smooth_trans_tot_cnt
     save_trans_probs(smooth_trans_probs, fname='data/jc6ub-tprob-smoothed.txt')
     # create word2idx and idx2word from vocal
@@ -210,18 +219,22 @@ def main():
     emit_cnt = cal_emit_count(trn_data, word2idx)
     # save to eprob.txt
     emit_tot_cnt = np.sum(emit_cnt, axis=0, keepdims=True) # first and last rows are zero.
-    emit_tot_cnt[:, 0]= emit_tot_cnt[:, -1] = 1.
+    emit_tot_cnt[:, 0] = emit_tot_cnt[:, -1] = 1.
     emit_probs = emit_cnt / emit_tot_cnt # first and last rows are zero.
     save_emit_probs(emit_probs, idx2word, fname='data/jc6ub-eprob.txt')
     # smoothing
     smooth_emit_cnt = emit_cnt + ALPHA
+    smooth_emit_cnt[:,0] = smooth_emit_cnt[:, -1] = 0
     smooth_emit_tot_cnt = np.sum(smooth_emit_cnt, axis=0, keepdims=True)
+    smooth_emit_tot_cnt[:, 0] = smooth_emit_tot_cnt[:, -1] = 1.
     smooth_emit_probs = smooth_emit_cnt / smooth_emit_tot_cnt
     save_emit_probs(smooth_emit_probs, idx2word, fname='data/jc6ub-eprob-smoothed.txt')
-    # Viterbi algorithm in log space
     # convert probabilities to log space
     dev_data = load_dev_data('data/dev.pos', vocal)
+    smooth_trans_probs[:,0] = smooth_trans_probs[-1,:] = 1e-200 # avoid dividing by zero encountered in log
+    smooth_emit_probs[:,0] = smooth_emit_probs[:,-1] = 1e-200 # avoid dividing by zero encountered in log
     smooth_trans_logprobs, smooth_emit_logprobs = np.log(smooth_trans_probs), np.log(smooth_emit_probs)
+    # Viterbi algorithm in log space
     viterbi_decoding(dev_data, smooth_trans_logprobs, smooth_emit_logprobs, word2idx)
     dev_acc = test_acc(dev_data)
     print('using Viterbi decoding, dev acc:', dev_acc)
